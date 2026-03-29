@@ -17,7 +17,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import pickle, json, os, io, time, warnings, requests
+import pickle, json, os, io, warnings
 from datetime import timedelta
  
 warnings.filterwarnings("ignore")
@@ -81,73 +81,15 @@ def kpi(val, lbl):
 #  DATA: DOWNLOAD + PREPROCESS (cached — runs once)
 # ═══════════════════════════════════════════════════════════════════════════
  
-STATIONS = {
-    "Karachi": (24.86, 67.01), "Thatta": (24.75, 67.92),
-    "Badin": (24.63, 68.84),   "Ormara": (25.21, 64.64),
-    "Pasni": (25.26, 63.47),   "Gwadar": (25.12, 62.33),
-    "Jiwani": (25.05, 61.80),  "Turbat": (26.00, 63.05),
-}
+# ═══════════════════════════════════════════════════════════════════════════
+#  DATA: Load from CSV (pre-downloaded, pushed to GitHub)
+# ═══════════════════════════════════════════════════════════════════════════
  
-# ── Only confirmed valid daily variables for Open-Meteo /v1/archive ────────
-DAILY_VARS = [
-    "temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
-    "apparent_temperature_max", "apparent_temperature_min",
-    "precipitation_sum", "rain_sum",
-    "windspeed_10m_max", "windgusts_10m_max", "winddirection_10m_dominant",
-    "shortwave_radiation_sum", "et0_fao_evapotranspiration",
-]
- 
-# Year chunks to avoid API timeouts on large requests
-YEAR_CHUNKS = [
-    ("2000-01-01", "2005-12-31"),
-    ("2006-01-01", "2010-12-31"),
-    ("2011-01-01", "2015-12-31"),
-    ("2016-01-01", "2020-12-31"),
-    ("2021-01-01", "2024-12-31"),
-]
- 
- 
-@st.cache_data(show_spinner="🌐 Downloading 25 years of coastal weather data (this runs once) …")
-def download_data():
-    """Download from Open-Meteo Historical Archive API in year chunks."""
-    BASE = "https://archive-api.open-meteo.com/v1/archive"
-    all_frames = []
- 
-    for name, (lat, lon) in STATIONS.items():
-        station_frames = []
-        for start, end in YEAR_CHUNKS:
-            for attempt in range(3):  # retry up to 3 times
-                try:
-                    r = requests.get(BASE, params={
-                        "latitude": lat, "longitude": lon,
-                        "start_date": start, "end_date": end,
-                        "daily": ",".join(DAILY_VARS),
-                        "timezone": "Asia/Karachi",
-                    }, timeout=180)
-                    r.raise_for_status()
-                    d = pd.DataFrame(r.json()["daily"])
-                    d.rename(columns={"time": "date"}, inplace=True)
-                    d["date"] = pd.to_datetime(d["date"])
-                    station_frames.append(d)
-                    break  # success — exit retry loop
-                except Exception as e:
-                    if attempt == 2:
-                        st.warning(f"⚠️ Failed to download {name} ({start}–{end}): {e}")
-                    time.sleep(2 * (attempt + 1))  # backoff
- 
-            time.sleep(0.3)  # polite gap between chunks
- 
-        if station_frames:
-            sdf = pd.concat(station_frames, ignore_index=True)
-            sdf["station"] = name
-            sdf["latitude"], sdf["longitude"] = lat, lon
-            all_frames.append(sdf)
- 
-    if not all_frames:
-        st.error("❌ Could not download any data. Check your internet connection.")
-        st.stop()
- 
-    return pd.concat(all_frames, ignore_index=True)
+@st.cache_data(show_spinner="📂 Loading weather data …")
+def load_data():
+    """Load pre-downloaded CSV from the repo."""
+    df = pd.read_csv("data.csv", parse_dates=["date"])
+    return df
  
  
 @st.cache_data(show_spinner="⚙️ Engineering features …")
@@ -405,7 +347,7 @@ def main():
     </div>""", unsafe_allow_html=True)
  
     # ── Load data ─────────────────────────────────────────────────────
-    raw = download_data()
+    raw = load_data()
     df  = preprocess(raw)
     results = train_all_pipelines(df)
  
