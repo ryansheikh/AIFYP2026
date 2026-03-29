@@ -10,7 +10,7 @@
  SMIU Karachi — FYP 2025
 =============================================================================
 """
- 
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -19,9 +19,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pickle, json, os, io, warnings
 from datetime import timedelta
- 
+
 warnings.filterwarnings("ignore")
- 
+
 from xgboost import XGBRegressor, XGBClassifier
 from sklearn.metrics import (
     mean_absolute_error, mean_squared_error, r2_score,
@@ -33,8 +33,8 @@ import shap
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  PAGE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════
@@ -44,7 +44,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
- 
+
 # ── CSS ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -71,27 +71,27 @@ st.markdown("""
 .alert-st  { background:#f4ecf7; border-left:5px solid #8e44ad; color:#6c3483; }
 </style>
 """, unsafe_allow_html=True)
- 
- 
+
+
 def kpi(val, lbl):
     return f'<div class="kpi"><div class="val">{val}</div><div class="lbl">{lbl}</div></div>'
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  DATA: DOWNLOAD + PREPROCESS (cached — runs once)
 # ═══════════════════════════════════════════════════════════════════════════
- 
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  DATA: Load from CSV (pre-downloaded, pushed to GitHub)
 # ═══════════════════════════════════════════════════════════════════════════
- 
+
 @st.cache_data(show_spinner="📂 Loading weather data …")
 def load_data():
     """Load pre-downloaded CSV from the repo."""
     df = pd.read_csv("data.csv", parse_dates=["date"])
     return df
- 
- 
+
+
 @st.cache_data(show_spinner="⚙️ Engineering features …")
 def preprocess(df):
     """Clean, feature-engineer, and add labels."""
@@ -146,14 +146,14 @@ def preprocess(df):
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  MODEL TRAINING (cached — runs once per session)
 # ═══════════════════════════════════════════════════════════════════════════
- 
+
 META = {"date","station","latitude","longitude","label_heatwave","label_heavy_rain","label_storm"}
- 
+
 PIPELINE_CONFIG = {
     "temperature": {
         "target": "temperature_2m_mean",
@@ -178,37 +178,37 @@ PIPELINE_CONFIG = {
         "exclude": {"windspeed_10m_max","windgusts_10m_max"},
     },
 }
- 
- 
+
+
 def get_features(df, pipeline_name):
     excl = META | PIPELINE_CONFIG[pipeline_name]["exclude"]
     return [c for c in df.columns if c not in excl
             and df[c].dtype in (np.float64, np.int64, np.int32, float, int)]
- 
- 
+
+
 def time_split(df):
     train = df[df["date"].dt.year <= 2019]
     val   = df[(df["date"].dt.year > 2019) & (df["date"].dt.year <= 2021)]
     test  = df[df["date"].dt.year > 2021]
     return train, val, test
- 
- 
+
+
 @st.cache_resource(show_spinner="🤖 Training all 4 ML pipelines (this takes a few minutes on first run) …")
 def train_all_pipelines(_df):
     """Train all 4 pipelines, return dict of results."""
     df = _df.copy()
     results = {}
     train, val, test = time_split(df)
- 
+
     for pname, cfg in PIPELINE_CONFIG.items():
         feats = get_features(df, pname)
         target = cfg["target"]
         X_tr, y_tr = train[feats], train[target]
         X_vl, y_vl = val[feats],   val[target]
         X_te, y_te = test[feats],  test[target]
- 
+
         res = {"features": feats, "target": target, "type": cfg["type"]}
- 
+
         if cfg["type"] == "regression":
             # ── Main model ───────────────────────────────────────────
             model = XGBRegressor(
@@ -230,7 +230,7 @@ def train_all_pipelines(_df):
                 "Baseline_MAE": round(bl_mae, 3),
                 "Improvement_%": round((1 - mean_absolute_error(y_te, preds)/bl_mae)*100, 1),
             }
- 
+
             # ── Quantile models (uncertainty) ────────────────────────
             qmodels = {}
             for alpha in [0.05, 0.25, 0.50, 0.75, 0.95]:
@@ -253,7 +253,7 @@ def train_all_pipelines(_df):
             res["test_data"] = {"X": X_te, "y": y_te, "preds": preds,
                                 "q05": q05, "q25": q25, "q75": q75, "q95": q95,
                                 "dates": test["date"].values}
- 
+
         else:
             # ── Classification ───────────────────────────────────────
             spw = (len(y_tr)-y_tr.sum()) / max(y_tr.sum(), 1)
@@ -295,22 +295,22 @@ def train_all_pipelines(_df):
             res["confusion"] = confusion_matrix(y_te, preds)
             res["report"] = classification_report(y_te, preds, 
                 target_names=["Normal", pname.title()], zero_division=0)
- 
+
         # ── SHAP (subsample for speed) ───────────────────────────────
         X_shap = X_te.sample(n=min(800, len(X_te)), random_state=42)
         explainer = shap.TreeExplainer(model)
         sv = explainer.shap_values(X_shap)
         res["shap"] = {"values": sv, "X": X_shap}
- 
+
         results[pname] = res
- 
+
     return results
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  SHAP PLOT HELPERS
 # ═══════════════════════════════════════════════════════════════════════════
- 
+
 def shap_bar_fig(shap_vals, X_shap, title=""):
     fig, ax = plt.subplots(figsize=(8, 6))
     shap.summary_plot(shap_vals, X_shap, plot_type="bar", max_display=15, show=False)
@@ -321,7 +321,7 @@ def shap_bar_fig(shap_vals, X_shap, title=""):
     plt.close()
     buf.seek(0)
     return buf
- 
+
 def shap_beeswarm_fig(shap_vals, X_shap, title=""):
     fig, ax = plt.subplots(figsize=(8, 6))
     shap.summary_plot(shap_vals, X_shap, max_display=15, show=False)
@@ -332,12 +332,12 @@ def shap_beeswarm_fig(shap_vals, X_shap, title=""):
     plt.close()
     buf.seek(0)
     return buf
- 
- 
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  MAIN APP
 # ═══════════════════════════════════════════════════════════════════════════
- 
+
 def main():
     # ── Header ────────────────────────────────────────────────────────
     st.markdown("""
@@ -345,14 +345,14 @@ def main():
         <h1>🌊 Pakistan Coastal Climate Early Warning System</h1>
         <p>4 Separate AI Pipelines — Temperature • Heatwave • Rainfall • Storm | Uncertainty & Explainability (SHAP)</p>
     </div>""", unsafe_allow_html=True)
- 
+
     # ── Load data ─────────────────────────────────────────────────────
     raw = load_data()
     df  = preprocess(raw)
     results = train_all_pipelines(df)
- 
+
     stations = sorted(raw["station"].unique())
- 
+
     # ── Sidebar ───────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### ⚙️ Controls")
@@ -369,10 +369,10 @@ def main():
         ], label_visibility="collapsed")
         st.markdown("---")
         st.caption("Syed Bilal • Raiyan Sheikh • Numra Amjad\nDept. of AI & Math Sciences\nSMIU Karachi — FYP 2025")
- 
+
     mask = (raw["station"]==station) & (raw["date"].dt.year.between(*yr))
     dfs = raw[mask].copy()
- 
+
     # ══════════════════════════════════════════════════════════════════
     #  PAGE: OVERVIEW
     # ══════════════════════════════════════════════════════════════════
@@ -385,7 +385,7 @@ def main():
         wg = dfs["windgusts_10m_max"].max() if "windgusts_10m_max" in dfs.columns else (dfs["windspeed_10m_max"].max() if "windspeed_10m_max" in dfs.columns else 0)
         c4.markdown(kpi(f"{wg:.0f}km/h","Max Gust"), True)
         c5.markdown(kpi(f"{len(dfs):,}","Days"), True)
- 
+
         st.markdown('<div class="sec">⚠️ Extreme Events Detected</div>', True)
         hw = (dfs["temperature_2m_max"]>=42).sum()
         hr = (dfs["precipitation_sum"]>=30).sum()
@@ -395,7 +395,7 @@ def main():
         c1.markdown(f'<div class="alert-box alert-hw">🔥 <b>{hw}</b> Heatwave Days (≥42°C)</div>', True)
         c2.markdown(f'<div class="alert-box alert-rn">🌧️ <b>{hr}</b> Heavy Rain Days (≥30mm)</div>', True)
         c3.markdown(f'<div class="alert-box alert-st">🌀 <b>{sm}</b> Storm Days (gusts ≥60km/h)</div>', True)
- 
+
         # Annual trends
         yearly = dfs.groupby(dfs["date"].dt.year).agg(
             heatwave=("temperature_2m_max", lambda x: (x>=42).sum()),
@@ -408,7 +408,7 @@ def main():
                      color_discrete_map={"Heatwave Days":"#e74c3c","Heavy Rain Days":"#3498db"})
         fig.update_layout(height=380, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
- 
+
         # Heatmap
         mth = dfs.groupby([dfs["date"].dt.year, dfs["date"].dt.month])["temperature_2m_mean"].mean().reset_index()
         mth.columns = ["Year","Month","Temp"]
@@ -418,7 +418,7 @@ def main():
                         labels=dict(color="°C"), title="Monthly Temperature Heatmap")
         fig.update_layout(height=400, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
- 
+
     # ══════════════════════════════════════════════════════════════════
     #  PAGE: TEMPERATURE PIPELINE
     # ══════════════════════════════════════════════════════════════════
@@ -426,14 +426,14 @@ def main():
         st.markdown('<div class="sec">Pipeline 1 — Temperature Forecasting (XGBoost Regression)</div>', True)
         r = results["temperature"]
         m = r["metrics"]
- 
+
         c1,c2,c3,c4,c5 = st.columns(5)
         c1.markdown(kpi(f"{m['MAE']}°C","MAE"), True)
         c2.markdown(kpi(f"{m['RMSE']}°C","RMSE"), True)
         c3.markdown(kpi(m["R2"],"R² Score"), True)
         c4.markdown(kpi(f"{m['Baseline_MAE']}°C","Baseline MAE"), True)
         c5.markdown(kpi(f"{m['Improvement_%']}%","Improvement"), True)
- 
+
         # Uncertainty section
         st.markdown('<div class="sec">📐 Uncertainty Analysis (Quantile Regression)</div>', True)
         st.markdown("""
@@ -445,7 +445,7 @@ def main():
         c1.markdown(kpi(f"{m['CI90_coverage_%']}%","90% CI Coverage (target: 90%)"), True)
         c2.markdown(kpi(f"{m['CI50_coverage_%']}%","50% CI Coverage (target: 50%)"), True)
         c3.markdown(kpi(f"±{m['Avg_CI90_width']/2:.1f}°C","Avg Uncertainty"), True)
- 
+
         td = r["test_data"]
         n = min(365, len(td["y"]))
         fig = go.Figure()
@@ -466,7 +466,7 @@ def main():
         fig.update_layout(title="Temperature Forecast with Uncertainty Bands (Test Set — 2022-2024)",
                           yaxis_title="°C", height=450, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
- 
+
         # SHAP
         st.markdown('<div class="sec">🔍 Explainability (SHAP)</div>', True)
         st.markdown("SHAP values show **which features drive each prediction** and in which direction.")
@@ -475,7 +475,7 @@ def main():
                  caption="Top 15 Features by SHAP Importance", use_container_width=True)
         c2.image(shap_beeswarm_fig(r["shap"]["values"], r["shap"]["X"], "SHAP Beeswarm"),
                  caption="Feature Impact Direction", use_container_width=True)
- 
+
     # ══════════════════════════════════════════════════════════════════
     #  PAGES: CLASSIFICATION PIPELINES (shared layout)
     # ══════════════════════════════════════════════════════════════════
@@ -488,18 +488,18 @@ def main():
                   "rainfall": ("Heavy Rainfall","≥30mm/day","🌧️"),
                   "storm": ("Storm Risk","gusts ≥60km/h","🌀")}
         lbl, thresh, emoji = labels[pname]
- 
+
         st.markdown(f'<div class="sec">Pipeline — {lbl} Detection (XGBoost Classification, threshold: {thresh})</div>', True)
         r = results[pname]
         m = r["metrics"]
- 
+
         c1,c2,c3,c4,c5 = st.columns(5)
         c1.markdown(kpi(m["Accuracy"],"Accuracy"), True)
         c2.markdown(kpi(m["Precision"],"Precision"), True)
         c3.markdown(kpi(m["Recall"],"Recall"), True)
         c4.markdown(kpi(m["F1"],"F1 Score"), True)
         c5.markdown(kpi(m["AUC_ROC"],"AUC-ROC"), True)
- 
+
         # Confusion matrix
         st.markdown('<div class="sec">Confusion Matrix & Classification Report</div>', True)
         c1, c2 = st.columns(2)
@@ -512,7 +512,7 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
         with c2:
             st.code(r["report"])
- 
+
         # Uncertainty
         st.markdown('<div class="sec">📐 Uncertainty Analysis (Calibrated Probabilities + Entropy)</div>', True)
         st.markdown("""
@@ -522,7 +522,7 @@ def main():
         c1, c2 = st.columns(2)
         c1.markdown(kpi(m["Avg_entropy"],"Avg Entropy (lower = more certain)"), True)
         c2.markdown(kpi(f"{m['High_confidence_%']}%","High Confidence Predictions"), True)
- 
+
         td = r["test_data"]
         c1, c2 = st.columns(2)
         with c1:
@@ -551,7 +551,7 @@ def main():
                     st.plotly_chart(fig, use_container_width=True)
                 except Exception:
                     st.info("Not enough positive samples for reliability diagram.")
- 
+
         # SHAP
         st.markdown('<div class="sec">🔍 Explainability (SHAP)</div>', True)
         c1, c2 = st.columns(2)
@@ -559,13 +559,13 @@ def main():
                  f"Feature Importance — {lbl}"), use_container_width=True)
         c2.image(shap_beeswarm_fig(r["shap"]["values"], r["shap"]["X"],
                  f"SHAP Beeswarm — {lbl}"), use_container_width=True)
- 
+
     # ══════════════════════════════════════════════════════════════════
     #  PAGE: ALL MODELS COMPARISON
     # ══════════════════════════════════════════════════════════════════
     elif page == "📊 All Models Comparison":
         st.markdown('<div class="sec">All 4 Pipelines — Performance Comparison</div>', True)
- 
+
         # Metrics table
         rows = []
         for p in ["temperature","heatwave","rainfall","storm"]:
@@ -574,7 +574,7 @@ def main():
             rows.append(row)
         comp = pd.DataFrame(rows)
         st.dataframe(comp, use_container_width=True, hide_index=True)
- 
+
         # Classification bar chart
         cls = comp[comp["Type"]=="Classification"]
         if not cls.empty:
@@ -587,7 +587,7 @@ def main():
                               barmode="group", height=420, template="plotly_white",
                               yaxis=dict(range=[0,1.05]))
             st.plotly_chart(fig, use_container_width=True)
- 
+
         # SHAP grid
         st.markdown('<div class="sec">SHAP Feature Importance — All Pipelines</div>', True)
         cols = st.columns(4)
@@ -595,7 +595,7 @@ def main():
             r = results[p]
             cols[i].image(shap_bar_fig(r["shap"]["values"], r["shap"]["X"], p.title()),
                           caption=p.title(), use_container_width=True)
- 
+
         # Uncertainty comparison
         st.markdown('<div class="sec">Uncertainty Metrics</div>', True)
         unc_rows = []
@@ -607,7 +607,7 @@ def main():
                 if k in m: row[k] = m[k]
             unc_rows.append(row)
         st.dataframe(pd.DataFrame(unc_rows), use_container_width=True, hide_index=True)
- 
- 
+
+
 if __name__ == "__main__":
     main()
