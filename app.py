@@ -82,13 +82,104 @@ def kpi(val, lbl):
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  DATA: Load from CSV (pre-downloaded, pushed to GitHub)
+#  DATA: Load CSV if available, otherwise download from API with rate limiting
 # ═══════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(show_spinner="📂 Loading weather data …")
+import time as _time
+import requests as _requests
+
+STATIONS = {
+    "Karachi": (24.86, 67.01), "Thatta": (24.75, 67.92),
+    "Badin": (24.63, 68.84),   "Ormara": (25.21, 64.64),
+    "Pasni": (25.26, 63.47),   "Gwadar": (25.12, 62.33),
+    "Jiwani": (25.05, 61.80),  "Turbat": (26.00, 63.05),
+}
+
+DAILY_VARS = "temperature_2m_max,temperature_2m_min,temperature_2m_mean,apparent_temperature_max,apparent_temperature_min,precipitation_sum,rain_sum,windspeed_10m_max,windgusts_10m_max,winddirection_10m_dominant,shortwave_radiation_sum,et0_fao_evapotranspiration"
+
+CHUNKS = [
+    ("2000-01-01", "2004-12-31"),
+    ("2005-01-01", "2009-12-31"),
+    ("2010-01-01", "2014-12-31"),
+    ("2015-01-01", "2019-12-31"),
+    ("2020-01-01", "2024-12-31"),
+]
+
+
+def _download_from_api():
+    """Download from Open-Meteo with HEAVY rate limiting to avoid 429."""
+    BASE = "https://archive-api.open-meteo.com/v1/archive"
+    all_frames = []
+    total = len(STATIONS) * len(CHUNKS)
+    done = 0
+    progress = st.progress(0, text="Downloading weather data …")
+
+    for name, (lat, lon) in STATIONS.items():
+        for start, end in CHUNKS:
+            done += 1
+            progress.progress(done / total, text=f"📡 {name} ({start[:4]}–{end[:4]}) … {done}/{total}")
+
+            success = False
+            for attempt in range(6):
+                try:
+                    r = _requests.get(BASE, params={
+                        "latitude": lat, "longitude": lon,
+                        "start_date": start, "end_date": end,
+                        "daily": DAILY_VARS,
+                        "timezone": "Asia/Karachi",
+                    }, timeout=180)
+
+                    if r.status_code == 429:
+                        wait = 30 * (attempt + 1)
+                        progress.progress(done / total, text=f"⏳ Rate limited — waiting {wait}s …")
+                        _time.sleep(wait)
+                        continue
+
+                    r.raise_for_status()
+                    d = pd.DataFrame(r.json()["daily"])
+                    d.rename(columns={"time": "date"}, inplace=True)
+                    d["date"] = pd.to_datetime(d["date"])
+                    d["station"] = name
+                    d["latitude"], d["longitude"] = lat, lon
+                    all_frames.append(d)
+                    success = True
+                    break
+                except Exception as e:
+                    wait = 20 * (attempt + 1)
+                    _time.sleep(wait)
+
+            if not success:
+                st.warning(f"⚠️ Could not download {name} ({start}–{end})")
+
+            _time.sleep(8)  # 8 second gap between EVERY request
+
+    progress.empty()
+
+    if not all_frames:
+        st.error("❌ Download failed. Please add data.csv to your GitHub repo manually.")
+        st.stop()
+
+    return pd.concat(all_frames, ignore_index=True)
+
+
+@st.cache_data(show_spinner=False)
 def load_data():
-    """Load pre-downloaded CSV from the repo."""
-    df = pd.read_csv("data.csv", parse_dates=["date"])
+    """Load data.csv if it exists in the repo, otherwise download from API."""
+    csv_path = "data.csv"
+
+    if os.path.exists(csv_path):
+        return pd.read_csv(csv_path, parse_dates=["date"])
+
+    # CSV not found — download from API
+    st.info("📡 data.csv not found in repo. Downloading from Open-Meteo API (first time only, ~5 min) …")
+    df = _download_from_api()
+
+    # Try to save for next time (may fail on read-only filesystem)
+    try:
+        df.to_csv(csv_path, index=False)
+    except Exception:
+        pass
+
     return df
 
 
